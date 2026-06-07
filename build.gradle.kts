@@ -1,16 +1,14 @@
 plugins {
     id("java")
-}
-
-subprojects {
-    apply(plugin = "maven-publish")
+    id("maven-publish")
 }
 
 allprojects {
     apply(plugin = "java")
+    apply(plugin = "maven-publish")
 
     group = "net.nyana"
-    version = "1.0.1"
+    version = "1.0.2"
 
     java {
         sourceCompatibility = JavaVersion.VERSION_21
@@ -34,6 +32,26 @@ allprojects {
 
     tasks.withType<Test> {
         useJUnitPlatform()
+    }
+
+    publishing {
+        repositories {
+            maven {
+                name = "nachorealms"
+                url = uri("https://repo.catnies.top/releases")
+                credentials(PasswordCredentials::class)
+                authentication { create<BasicAuthentication>("basic") }
+            }
+        }
+
+        publications {
+            create<MavenPublication>("maven") {
+                groupId = project.group.toString()
+                artifactId = if (project == rootProject) "nyana-cache" else "nyana-cache-${project.name}"
+                version = project.version.toString()
+                from(components["java"])
+            }
+        }
     }
 }
 
