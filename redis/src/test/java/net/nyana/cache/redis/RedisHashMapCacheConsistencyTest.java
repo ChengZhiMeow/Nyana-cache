@@ -8,7 +8,9 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @EnabledIfSystemProperty(named = RedisTestSupport.ENABLED_PROPERTY, matches = "true")
 class RedisHashMapCacheConsistencyTest {
@@ -107,6 +109,72 @@ class RedisHashMapCacheConsistencyTest {
     }
 
     @Test
+    void missKeysAreRecordedWhenEnabled() {
+        String namespace = RedisTestSupport.namespace();
+        RedisHashMapCacheConsistencyTest.log(namespace, "namespace", namespace);
+
+        try (
+                RedisClient client = RedisTestSupport.client();
+                RedisCacheService<String> redis = new RedisCacheService<>(
+                        new NyanaCache(),
+                        client,
+                        namespace,
+                        false,
+                        false
+                );
+                TrackingRedisHashMapCacheService local = new TrackingRedisHashMapCacheService(
+                        new NyanaCache(),
+                        client,
+                        namespace
+                )
+        ) {
+            redis.clear();
+
+            assertNull(local.get("missing"));
+            assertTrue(local.getMiss().contains("missing"));
+            RedisHashMapCacheConsistencyTest.log(namespace, "miss after missing get", local.getMiss());
+
+            assertFalse(local.containsKey("other"));
+            assertTrue(local.getMiss().contains("other"));
+            RedisHashMapCacheConsistencyTest.log(namespace, "miss after missing contains", local.getMiss());
+
+            redis.put("target", null);
+            assertNull(local.get("target"));
+            assertFalse(local.getMiss().contains("target"));
+            RedisHashMapCacheConsistencyTest.log(namespace, "miss after null target get", local.getMiss());
+
+            local.put("missing", "value");
+            assertFalse(local.getMiss().contains("missing"));
+            RedisHashMapCacheConsistencyTest.log(namespace, "miss after put missing", local.getMiss());
+        }
+    }
+
+    @Test
+    void missKeysCanBeDisabled() {
+        String namespace = RedisTestSupport.namespace();
+        RedisHashMapCacheConsistencyTest.log(namespace, "namespace", namespace);
+
+        try (
+                RedisClient client = RedisTestSupport.client();
+                TrackingRedisHashMapCacheService local = new TrackingRedisHashMapCacheService(
+                        new NyanaCache(),
+                        client,
+                        namespace,
+                        false
+                )
+        ) {
+            assertNull(local.get("missing"));
+            assertTrue(local.getMiss().isEmpty());
+            RedisHashMapCacheConsistencyTest.log(namespace, "disabled miss after missing get", local.getMiss());
+
+            local.setRecordMiss(true);
+            assertNull(local.get("enabled"));
+            assertTrue(local.getMiss().contains("enabled"));
+            RedisHashMapCacheConsistencyTest.log(namespace, "enabled miss after missing get", local.getMiss());
+        }
+    }
+
+    @Test
     void expiredEntriesAreIgnoredAfterStreamSync() throws InterruptedException {
         String namespace = RedisTestSupport.namespace();
         RedisHashMapCacheConsistencyTest.log(namespace, "namespace", namespace);
@@ -160,8 +228,21 @@ class RedisHashMapCacheConsistencyTest {
     private static final class TrackingRedisHashMapCacheService extends RedisHashMapCacheService<String> {
         private CacheLayer lastReadLayer;
 
-        private TrackingRedisHashMapCacheService(NyanaCache cache, RedisClient client, String namespace) {
-            super(cache, client, namespace);
+        private TrackingRedisHashMapCacheService(
+                NyanaCache cache,
+                RedisClient client,
+                String namespace
+        ) {
+            this(cache, client, namespace, true);
+        }
+
+        private TrackingRedisHashMapCacheService(
+                NyanaCache cache,
+                RedisClient client,
+                String namespace,
+                boolean recordMiss
+        ) {
+            super(cache, client, namespace, recordMiss);
         }
 
         @Override

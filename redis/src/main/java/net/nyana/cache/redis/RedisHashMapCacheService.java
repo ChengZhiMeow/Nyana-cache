@@ -17,16 +17,20 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> implements AutoCloseable {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
+    private final Set<String> miss = ConcurrentHashMap.newKeySet();
     private final RedisCacheService<V> redis;
     private final StatefulRedisConnection<String, byte[]> streamConnection;
     private final RedisCommands<String, byte[]> streamCommands;
+    private volatile boolean recordMiss;
     private volatile boolean closed;
     private volatile String lastStreamId = "$";
 
@@ -35,10 +39,28 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
             @NotNull RedisClient client,
             @NotNull String namespace
     ) {
+        this(cache, client, namespace, true);
+    }
+
+    public RedisHashMapCacheService(
+            @NotNull NyanaCache cache,
+            @NotNull RedisClient client,
+            @NotNull String namespace,
+            boolean recordMiss
+    ) {
         super(cache);
         this.redis = new RedisCacheService<>(cache, client, namespace, false, false);
         this.streamConnection = client.connect();
         this.streamCommands = this.streamConnection.sync();
+        this.recordMiss = recordMiss;
+    }
+
+    public @NotNull Set<String> getMiss() {
+        return this.miss;
+    }
+
+    public void setRecordMiss(boolean recordMiss) {
+        this.recordMiss = recordMiss;
     }
 
     @Override
@@ -87,18 +109,21 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
             @Nullable V value,
             @Nullable Long expireSeconds
     ) {
+        this.miss.remove(key);
         CompletableFuture.runAsync(() -> this.redis.doPut(key, value, expireSeconds), this.executor)
                 .thenRun(() -> super.doPut(key, value, expireSeconds));
     }
 
     @Override
     protected void doRemove(@NotNull String key) {
+        this.miss.remove(key);
         CompletableFuture.runAsync(() -> this.redis.doRemove(key), this.executor)
                 .thenRun(() -> super.doRemove(key));
     }
 
     @Override
     protected void doClear() {
+        this.miss.clear();
         CompletableFuture.runAsync(this.redis::doClear, this.executor)
                 .thenRun(super::doClear);
     }
@@ -106,12 +131,15 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
     @Override
     protected boolean doContainsKey(@NotNull String key) {
         if (super.doContainsKey(key)) return true;
-        return this.redis.doContainsKey(key);
+        boolean contains = this.redis.doContainsKey(key);
+        if (!contains && this.recordMiss) this.miss.add(key);
+        return contains;
     }
 
     @Override
     protected @Nullable V doGet(@NotNull String key) {
         if (super.doContainsKey(key)) return super.doGet(key);
+        if (!this.doContainsKey(key)) return null;
         return this.redis.doGet(key);
     }
 
@@ -120,6 +148,7 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
         byte[] keyData = body.get("key");
 
         if (Arrays.equals(op, RedisStreamOperation.CLEAR.value())) {
+            this.miss.clear();
             super.doClear();
             return;
         }
@@ -130,8 +159,10 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
             byte[] expireData = body.get("expireSeconds");
             Long expire = expireData != null ? Long.parseLong(new String(expireData, StandardCharsets.UTF_8)) : null;
 
+            this.miss.remove(key);
             super.doPut(key, this.redis.bytesToValue(body.get("value")), expire);
         } else if (Arrays.equals(op, RedisStreamOperation.REMOVE.value())) {
+            this.miss.remove(key);
             super.doRemove(key);
         }
     }
