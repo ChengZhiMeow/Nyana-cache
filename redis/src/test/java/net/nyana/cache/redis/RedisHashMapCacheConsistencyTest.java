@@ -150,27 +150,42 @@ class RedisHashMapCacheConsistencyTest {
     }
 
     @Test
-    void missKeysCanBeDisabled() {
+    void readsCanBeLimitedToLocalHashMap() {
         String namespace = RedisTestSupport.namespace();
         RedisHashMapCacheConsistencyTest.log(namespace, "namespace", namespace);
 
         try (
                 RedisClient client = RedisTestSupport.client();
+                RedisCacheService<String> redis = new RedisCacheService<>(
+                        new NyanaCache(),
+                        client,
+                        namespace,
+                        false,
+                        false
+                );
                 TrackingRedisHashMapCacheService local = new TrackingRedisHashMapCacheService(
                         new NyanaCache(),
                         client,
                         namespace,
-                        false
+                        true
                 )
         ) {
-            assertNull(local.get("missing"));
-            assertTrue(local.getMiss().isEmpty());
-            RedisHashMapCacheConsistencyTest.log(namespace, "disabled miss after missing get", local.getMiss());
+            redis.clear();
+            redis.put("name", "nyana");
 
-            local.setRecordMiss(true);
-            assertNull(local.get("enabled"));
-            assertTrue(local.getMiss().contains("enabled"));
-            RedisHashMapCacheConsistencyTest.log(namespace, "enabled miss after missing get", local.getMiss());
+            assertNull(local.get("name"));
+            assertEquals(CacheLayer.NONE, local.lastReadLayer);
+            assertTrue(local.getMiss().contains("name"));
+            assertFalse(local.containsKey("name"));
+            assertEquals(Map.of(), local.entries());
+            assertEquals(0, local.size());
+            assertEquals("nyana", redis.get("name"));
+            RedisHashMapCacheConsistencyTest.log(namespace, "local-only reads miss", local.getMiss());
+
+            local.setAlwaysReadFromHashMap(false);
+            assertEquals("nyana", local.get("name"));
+            assertEquals(CacheLayer.REDIS, local.lastReadLayer);
+            RedisHashMapCacheConsistencyTest.log(namespace, "read-through get layer", local.lastReadLayer);
         }
     }
 
@@ -222,10 +237,12 @@ class RedisHashMapCacheConsistencyTest {
 
     private enum CacheLayer {
         HASHMAP,
-        REDIS
+        REDIS,
+        NONE
     }
 
     private static final class TrackingRedisHashMapCacheService extends RedisHashMapCacheService<String> {
+        private boolean alwaysReadFromHashMap;
         private CacheLayer lastReadLayer;
 
         private TrackingRedisHashMapCacheService(
@@ -233,21 +250,29 @@ class RedisHashMapCacheConsistencyTest {
                 RedisClient client,
                 String namespace
         ) {
-            this(cache, client, namespace, true);
+            this(cache, client, namespace, false);
         }
 
         private TrackingRedisHashMapCacheService(
                 NyanaCache cache,
                 RedisClient client,
                 String namespace,
-                boolean recordMiss
+                boolean alwaysReadFromHashMap
         ) {
-            super(cache, client, namespace, recordMiss);
+            super(cache, client, namespace, alwaysReadFromHashMap);
+            this.alwaysReadFromHashMap = alwaysReadFromHashMap;
+        }
+
+        @Override
+        public void setAlwaysReadFromHashMap(boolean alwaysReadFromHashMap) {
+            super.setAlwaysReadFromHashMap(alwaysReadFromHashMap);
+            this.alwaysReadFromHashMap = alwaysReadFromHashMap;
         }
 
         @Override
         protected String doGet(String key) {
-            this.lastReadLayer = super.doEntries().containsKey(key) ? CacheLayer.HASHMAP : CacheLayer.REDIS;
+            if (super.doEntries().containsKey(key)) this.lastReadLayer = CacheLayer.HASHMAP;
+            else this.lastReadLayer = this.alwaysReadFromHashMap ? CacheLayer.NONE : CacheLayer.REDIS;
             String value = super.doGet(key);
             System.out.println("[redis-hashmap] get key=" + key + ", layer=" + this.lastReadLayer + ", value=" + value);
             return value;

@@ -30,7 +30,7 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
     private final RedisCacheService<V> redis;
     private final StatefulRedisConnection<String, byte[]> streamConnection;
     private final RedisCommands<String, byte[]> streamCommands;
-    private volatile boolean recordMiss;
+    private volatile boolean alwaysReadFromHashMap;
     private volatile boolean closed;
     private volatile String lastStreamId = "$";
 
@@ -39,28 +39,28 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
             @NotNull RedisClient client,
             @NotNull String namespace
     ) {
-        this(cache, client, namespace, true);
+        this(cache, client, namespace, false);
     }
 
     public RedisHashMapCacheService(
             @NotNull NyanaCache cache,
             @NotNull RedisClient client,
             @NotNull String namespace,
-            boolean recordMiss
+            boolean alwaysReadFromHashMap
     ) {
         super(cache);
         this.redis = new RedisCacheService<>(cache, client, namespace, false, false);
         this.streamConnection = client.connect();
         this.streamCommands = this.streamConnection.sync();
-        this.recordMiss = recordMiss;
+        this.alwaysReadFromHashMap = alwaysReadFromHashMap;
     }
 
     public @NotNull Set<String> getMiss() {
         return this.miss;
     }
 
-    public void setRecordMiss(boolean recordMiss) {
-        this.recordMiss = recordMiss;
+    public void setAlwaysReadFromHashMap(boolean alwaysReadFromHashMap) {
+        this.alwaysReadFromHashMap = alwaysReadFromHashMap;
     }
 
     @Override
@@ -131,14 +131,22 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
     @Override
     protected boolean doContainsKey(@NotNull String key) {
         if (super.doContainsKey(key)) return true;
+        if (this.alwaysReadFromHashMap) {
+            this.miss.add(key);
+            return false;
+        }
         boolean contains = this.redis.doContainsKey(key);
-        if (!contains && this.recordMiss) this.miss.add(key);
+        if (!contains) this.miss.add(key);
         return contains;
     }
 
     @Override
     protected @Nullable V doGet(@NotNull String key) {
         if (super.doContainsKey(key)) return super.doGet(key);
+        if (this.alwaysReadFromHashMap) {
+            this.miss.add(key);
+            return null;
+        }
         if (!this.doContainsKey(key)) return null;
         return this.redis.doGet(key);
     }
