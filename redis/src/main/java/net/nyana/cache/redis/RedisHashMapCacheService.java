@@ -23,6 +23,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+@SuppressWarnings("unchecked")
 public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> implements AutoCloseable {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
@@ -39,7 +40,16 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
             @NotNull RedisClient client,
             @NotNull String namespace
     ) {
-        this(cache, client, namespace, false);
+        this(cache, client, namespace, false, null);
+    }
+
+    public RedisHashMapCacheService(
+            @NotNull NyanaCache cache,
+            @NotNull RedisClient client,
+            @NotNull String namespace,
+            @NotNull Class<V> type
+    ) {
+        this(cache, client, namespace, false, type);
     }
 
     public RedisHashMapCacheService(
@@ -48,8 +58,20 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
             @NotNull String namespace,
             boolean alwaysReadFromHashMap
     ) {
+        this(cache, client, namespace, alwaysReadFromHashMap, null);
+    }
+
+    public RedisHashMapCacheService(
+            @NotNull NyanaCache cache,
+            @NotNull RedisClient client,
+            @NotNull String namespace,
+            boolean alwaysReadFromHashMap,
+            @Nullable Class<V> type
+    ) {
         super(cache);
-        this.redis = new RedisCacheService<>(cache, client, namespace, false, false);
+        if (type != null)
+            this.redis = new RedisCacheService<>(cache, client, namespace, false, false, type);
+        else this.redis = new RedisCacheService<>(cache, client, namespace, false, false);
         this.streamConnection = client.connect();
         this.streamCommands = this.streamConnection.sync();
         this.alwaysReadFromHashMap = alwaysReadFromHashMap;

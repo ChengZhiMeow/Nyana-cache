@@ -2,15 +2,14 @@ package net.nyana.cache.redis;
 
 import net.nyana.cache.NyanaCache;
 import net.nyana.cache.redis.client.RedisClient;
+import net.nyana.cache.service.CacheService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
+import java.util.Arrays;
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 @EnabledIfSystemProperty(named = RedisTestSupport.ENABLED_PROPERTY, matches = "true")
 class RedisHashMapCacheConsistencyTest {
@@ -187,6 +186,35 @@ class RedisHashMapCacheConsistencyTest {
             assertEquals(CacheLayer.REDIS, local.lastReadLayer);
             RedisHashMapCacheConsistencyTest.log(namespace, "read-through get layer", local.lastReadLayer);
         }
+    }
+
+    @Test
+    void byteArrayValuesUseDeclaredSerializer() throws InterruptedException {
+        String namespace = RedisTestSupport.namespace();
+        byte[] payload = new byte[]{10, 1, 0, 4, 109, 111, 100, 101};
+        RedisHashMapCacheConsistencyTest.log(namespace, "namespace", namespace);
+        RedisClient client = RedisTestSupport.client();
+        CacheService<String, byte[]> localA = new RedisHashMapCacheService<>(
+                new NyanaCache(),
+                client,
+                namespace,
+                byte[].class
+        );
+        CacheService<String, byte[]> localB = new RedisHashMapCacheService<>(
+                new NyanaCache(),
+                client,
+                namespace,
+                byte[].class
+        );
+
+        localA.init();
+        localB.init();
+
+        localA.put("payload", payload);
+        RedisTestSupport.await(() -> Arrays.equals(payload, localB.get("payload")));
+
+        assertArrayEquals(payload, localB.get("payload"));
+        RedisHashMapCacheConsistencyTest.log(namespace, "localB byte[] payload", Arrays.toString(localB.get("payload")));
     }
 
     @Test

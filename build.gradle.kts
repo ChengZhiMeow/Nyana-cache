@@ -8,7 +8,7 @@ allprojects {
     apply(plugin = "maven-publish")
 
     group = "net.nyana"
-    version = "1.0.3"
+    version = "1.0.4"
 
     java {
         sourceCompatibility = JavaVersion.VERSION_21
