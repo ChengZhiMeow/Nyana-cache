@@ -1,5 +1,8 @@
 package net.nyana.cache.redis;
 
+import io.lettuce.core.Range;
+import io.lettuce.core.StreamMessage;
+import io.lettuce.core.XAddArgs;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
 import net.nyana.cache.NyanaCache;
@@ -138,6 +141,41 @@ class RedisCacheServiceTest {
                     List.of("expired", "name"),
                     service.remainingExpireSeconds(List.of("name", "expired")).keySet().stream().sorted().toList()
             );
+        }
+    }
+
+    @Test
+    void streamEntriesAreTrimmedAndExpireAfterSixtySeconds() {
+        String namespace = RedisTestSupport.namespace();
+        String streamKey = namespace + ":stream";
+        RedisCacheServiceTest.log(namespace, "namespace", namespace);
+
+        try (
+                RedisClient client = RedisTestSupport.client();
+                StatefulRedisConnection<String, byte[]> connection = client.connect()
+        ) {
+            RedisCommands<String, byte[]> commands = connection.sync();
+            commands.xadd(
+                    streamKey,
+                    new XAddArgs().id("1-0"),
+                    Map.of("op", "old".getBytes(StandardCharsets.UTF_8))
+            );
+
+            try (RedisCacheService<String> service = new RedisCacheService<>(
+                    new NyanaCache(),
+                    client,
+                    namespace,
+                    false,
+                    false
+            )) {
+                service.put("name", "nyana");
+            }
+
+            List<StreamMessage<String, byte[]>> messages = commands.xrange(streamKey, Range.unbounded());
+            assertEquals(1, messages.size());
+            assertArrayEquals(RedisStreamOperation.PUT.value(), messages.getFirst().getBody().get("op"));
+            Long ttl = commands.ttl(streamKey);
+            assertTrue(ttl > 0L && ttl <= 60L);
         }
     }
 

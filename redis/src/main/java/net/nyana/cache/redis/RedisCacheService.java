@@ -16,6 +16,8 @@ import java.util.*;
 
 public class RedisCacheService<V> extends CacheService<String, V> implements AutoCloseable {
     private static final int STORAGE_VERSION = 2;
+    private static final long STREAM_EXPIRE_SECONDS = 60L;
+    private static final long STREAM_RETENTION_MILLIS = STREAM_EXPIRE_SECONDS * 1000L;
 
     protected final String streamKey;
     private final RedisClient client;
@@ -220,6 +222,28 @@ public class RedisCacheService<V> extends CacheService<String, V> implements Aut
         return this.serializer.byBytes(bytes);
     }
 
+    private void publishStream(@NotNull Map<String, byte[]> body) {
+        String streamId = this.commands.xadd(this.streamKey, body);
+        this.trimStream(streamId);
+        this.commands.expire(this.streamKey, RedisCacheService.STREAM_EXPIRE_SECONDS);
+    }
+
+    private void trimStream(@NotNull String streamId) {
+        long streamMillis = this.streamMillis(streamId);
+        long minMillis = Math.max(0L, streamMillis - RedisCacheService.STREAM_RETENTION_MILLIS);
+        this.commands.xtrim(this.streamKey, new XTrimArgs().minId(minMillis + "-0"));
+    }
+
+    private long streamMillis(@NotNull String streamId) {
+        int separator = streamId.indexOf('-');
+        String millis = separator >= 0 ? streamId.substring(0, separator) : streamId;
+        try {
+            return Long.parseLong(millis);
+        } catch (NumberFormatException e) {
+            return System.currentTimeMillis();
+        }
+    }
+
     public @NotNull Map<String, V> match(@NotNull String pattern) {
         Map<String, V> entries = new HashMap<>();
 
@@ -276,7 +300,7 @@ public class RedisCacheService<V> extends CacheService<String, V> implements Aut
         body.put("key", keyData);
         body.put("value", data);
         if (!infinite) body.put("expireSeconds", String.valueOf(expireSeconds).getBytes(StandardCharsets.UTF_8));
-        this.commands.xadd(this.streamKey, body);
+        this.publishStream(body);
     }
 
     @Override
@@ -287,7 +311,7 @@ public class RedisCacheService<V> extends CacheService<String, V> implements Aut
         this.commands.del(this.ttlKey(key));
 
         // 广播操作
-        this.commands.xadd(this.streamKey, Map.of(
+        this.publishStream(Map.of(
                 "op", RedisStreamOperation.REMOVE.value(),
                 "key", keyData
         ));
@@ -314,7 +338,7 @@ public class RedisCacheService<V> extends CacheService<String, V> implements Aut
         }
 
         // 广播操作
-        this.commands.xadd(this.streamKey, Map.of(
+        this.publishStream(Map.of(
                 "op", RedisStreamOperation.CLEAR.value()
         ));
     }
