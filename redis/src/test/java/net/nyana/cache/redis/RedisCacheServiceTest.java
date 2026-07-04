@@ -1,14 +1,18 @@
 package net.nyana.cache.redis;
 
+import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.api.sync.RedisCommands;
 import net.nyana.cache.NyanaCache;
 import net.nyana.cache.redis.client.RedisClient;
+import net.nyana.cache.serialization.CacheSerializer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.*;
 
 @EnabledIfSystemProperty(named = RedisTestSupport.ENABLED_PROPERTY, matches = "true")
 class RedisCacheServiceTest {
@@ -94,6 +98,85 @@ class RedisCacheServiceTest {
             assertNull(service.get("expired"));
             RedisCacheServiceTest.log(namespace, "match all after expire", service.match(namespace + ":data:*"));
             assertEquals(Map.of("name", "nyana"), service.match(namespace + ":data:*"));
+        }
+    }
+
+    @Test
+    void ttlMetadataIsStoredInVersionTwoNamespace() {
+        String namespace = RedisTestSupport.namespace();
+        RedisCacheServiceTest.log(namespace, "namespace", namespace);
+
+        try (
+                RedisClient client = RedisTestSupport.client();
+                RedisCacheService<String> service = new RedisCacheService<>(
+                        new NyanaCache(),
+                        client,
+                        namespace,
+                        false,
+                        false
+                );
+                StatefulRedisConnection<String, byte[]> connection = client.connect()
+        ) {
+            RedisCommands<String, byte[]> commands = connection.sync();
+            CacheSerializer<Integer> versionSerializer = (CacheSerializer<Integer>) service.getCache().serializationRegistry.get(Integer.class);
+            CacheSerializer<Long> ttlSerializer = (CacheSerializer<Long>) service.getCache().serializationRegistry.get(Long.class);
+            service.clear();
+            service.put("name", "nyana");
+            service.put("expired", "value", 30L);
+
+            assertEquals(2, versionSerializer.byBytes(commands.get(namespace + ":version")));
+            assertEquals(-1L, ttlSerializer.byBytes(commands.get(namespace + ":ttl:name")));
+            assertEquals(-1L, commands.ttl(namespace + ":ttl:name"));
+            assertNotNull(commands.get(namespace + ":ttl:expired"));
+            assertTrue(commands.ttl(namespace + ":ttl:expired") > 0L);
+            assertEquals(-1L, service.remainingExpireSeconds("name"));
+            assertEquals(
+                    List.of("expired", "name"),
+                    service.remainingExpireSeconds().keySet().stream().sorted().toList()
+            );
+            assertEquals(
+                    List.of("expired", "name"),
+                    service.remainingExpireSeconds(List.of("name", "expired")).keySet().stream().sorted().toList()
+            );
+        }
+    }
+
+    @Test
+    void missingVersionNamespaceIsMigratedToVersionTwo() {
+        String namespace = RedisTestSupport.namespace();
+        RedisCacheServiceTest.log(namespace, "namespace", namespace);
+
+        try (
+                RedisClient client = RedisTestSupport.client();
+                StatefulRedisConnection<String, byte[]> connection = client.connect()
+        ) {
+            RedisCommands<String, byte[]> commands = connection.sync();
+            commands.del(namespace + ":version");
+            commands.set(namespace + ":data:name", "nyana".getBytes(StandardCharsets.UTF_8));
+            commands.setex(namespace + ":data:expired", 30L, "value".getBytes(StandardCharsets.UTF_8));
+
+            NyanaCache cache = new NyanaCache();
+            CacheSerializer<Integer> versionSerializer = (CacheSerializer<Integer>) cache.serializationRegistry.get(Integer.class);
+            CacheSerializer<Long> ttlSerializer = (CacheSerializer<Long>) cache.serializationRegistry.get(Long.class);
+            try (RedisCacheService<String> service = new RedisCacheService<>(
+                    cache,
+                    client,
+                    namespace,
+                    false,
+                    false
+            )) {
+                assertEquals(2, versionSerializer.byBytes(commands.get(namespace + ":version")));
+                assertEquals(-1L, ttlSerializer.byBytes(commands.get(namespace + ":ttl:name")));
+                assertEquals(-1L, commands.ttl(namespace + ":ttl:name"));
+                assertNotNull(commands.get(namespace + ":ttl:expired"));
+                assertEquals("nyana", service.get("name"));
+                assertEquals("value", service.get("expired"));
+                assertEquals(-1L, service.remainingExpireSeconds("name"));
+                assertEquals(
+                        List.of("expired", "name"),
+                        service.remainingExpireSeconds().keySet().stream().sorted().toList()
+                );
+            }
         }
     }
 }

@@ -1,8 +1,6 @@
 package net.nyana.cache.redis;
 
-import io.lettuce.core.KeyScanCursor;
-import io.lettuce.core.ScanArgs;
-import io.lettuce.core.ScanCursor;
+import io.lettuce.core.*;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
 import net.nyana.cache.NyanaCache;
@@ -14,17 +12,19 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 
 public class RedisCacheService<V> extends CacheService<String, V> implements AutoCloseable {
+    private static final int STORAGE_VERSION = 2;
+
     protected final String streamKey;
     private final RedisClient client;
     private final StatefulRedisConnection<String, byte[]> connection;
     private final RedisCommands<String, byte[]> commands;
     private final String namespace;
     private final CacheSerializer<V> serializer;
+    private final CacheSerializer<Integer> versionSerializer;
+    private final CacheSerializer<Long> ttlSerializer;
 
     public RedisCacheService(
             @NotNull NyanaCache cache,
@@ -77,6 +77,10 @@ public class RedisCacheService<V> extends CacheService<String, V> implements Aut
         CacheSerializer<V> serializer = (CacheSerializer<V>) this.getCache().serializationRegistry.get(type);
         if (serializer == null) throw new IllegalArgumentException("No serializer registered for " + type);
         this.serializer = serializer;
+
+        this.versionSerializer = (CacheSerializer<Integer>) this.getCache().serializationRegistry.get(Integer.class);
+        this.ttlSerializer = (CacheSerializer<Long>) this.getCache().serializationRegistry.get(Long.class);
+        this.migrateStorageIfNeeded();
     }
 
     public @NotNull RedisClient getClient() {
@@ -91,11 +95,123 @@ public class RedisCacheService<V> extends CacheService<String, V> implements Aut
         return this.namespace + ":data:" + key;
     }
 
+    private @NotNull String ttlKey(@NotNull String key) {
+        return this.namespace + ":ttl:" + key;
+    }
+
+    private @Nullable Long remainingSeconds(byte @Nullable [] expireAtMillisData, long nowMillis) {
+        if (expireAtMillisData == null) return null;
+        long expireAtMillis = this.ttlSerializer.byBytes(expireAtMillisData);
+        if (expireAtMillis < 0L) return expireAtMillis;
+        long remainingMillis = expireAtMillis - nowMillis;
+        if (remainingMillis <= 0L) return null;
+        return Math.max(1L, (remainingMillis + 999L) / 1000L);
+    }
+
+    private synchronized void migrateStorageIfNeeded() {
+        String versionKey = this.namespace + ":version";
+        byte[] versionData = this.commands.get(versionKey);
+        int version = versionData == null ? 1 : this.versionSerializer.byBytes(versionData);
+
+        if (version == 1) {
+            this.commands.eval(
+                    """
+                            local version_key = KEYS[1]
+                            local storage_version = ARGV[1]
+                            local data_prefix = ARGV[2]
+                            local ttl_prefix = ARGV[3]
+                            local infinite_ttl = ARGV[4]
+                            local now_millis = tonumber(ARGV[5])
+                            local function long_bytes(value)
+                                local bytes = {}
+                                for i = 8, 1, -1 do
+                                    bytes[i] = string.char(math.floor(value % 256))
+                                    value = math.floor(value / 256)
+                                end
+                                return table.concat(bytes)
+                            end
+                            local cursor = '0'
+                            repeat
+                                local result = redis.call('SCAN', cursor, 'MATCH', data_prefix .. '*', 'COUNT', 1000)
+                                cursor = result[1]
+                                for _, data_key in ipairs(result[2]) do
+                                    local ttl = redis.call('TTL', data_key)
+                                    local ttl_key = ttl_prefix .. string.sub(data_key, string.len(data_prefix) + 1)
+                                    if ttl > 0 then
+                                        redis.call('SETEX', ttl_key, ttl, long_bytes(now_millis + ttl * 1000))
+                                    elseif ttl == -1 then
+                                        redis.call('SET', ttl_key, infinite_ttl)
+                                    else
+                                        redis.call('DEL', ttl_key)
+                                    end
+                                end
+                            until cursor == '0'
+                            redis.call('SET', version_key, storage_version)
+                            return 1
+                            """,
+                    ScriptOutputType.INTEGER,
+                    new String[]{versionKey},
+                    this.versionSerializer.toBytes(RedisCacheService.STORAGE_VERSION),
+                    (this.namespace + ":data:").getBytes(StandardCharsets.UTF_8),
+                    (this.namespace + ":ttl:").getBytes(StandardCharsets.UTF_8),
+                    this.ttlSerializer.toBytes(-1L),
+                    String.valueOf(System.currentTimeMillis()).getBytes(StandardCharsets.UTF_8)
+            );
+        }
+    }
+
     public @Nullable Long remainingExpireSeconds(@NotNull String key) {
         synchronized (this) {
-            Long ttl = this.commands.ttl(this.dataKey(key));
-            if (ttl == null || ttl < 0L) return null;
-            return ttl;
+            return this.remainingSeconds(this.commands.get(this.ttlKey(key)), System.currentTimeMillis());
+        }
+    }
+
+    public @NotNull Map<String, Long> remainingExpireSeconds() {
+        synchronized (this) {
+            Map<String, Long> expires = new HashMap<>();
+            ScanCursor cursor = ScanCursor.INITIAL;
+            String ttlPrefix = this.namespace + ":ttl:";
+            ScanArgs args = new ScanArgs().match(ttlPrefix + "*").limit(1000);
+            while (!cursor.isFinished()) {
+                KeyScanCursor<String> scan = this.commands.scan(cursor, args);
+                if (!scan.getKeys().isEmpty()) {
+                    long nowMillis = System.currentTimeMillis();
+                    List<KeyValue<String, byte[]>> values = this.commands.mget(scan.getKeys().toArray(String[]::new));
+                    for (KeyValue<String, byte[]> keyValue : values) {
+                        if (!keyValue.hasValue()) continue;
+                        Long remaining = this.remainingSeconds(keyValue.getValue(), nowMillis);
+                        if (remaining == null) continue;
+
+                        String redisKey = keyValue.getKey();
+                        String key = redisKey.startsWith(ttlPrefix) ? redisKey.substring(ttlPrefix.length()) : redisKey;
+                        expires.put(key, remaining);
+                    }
+                }
+                cursor = scan;
+            }
+
+            return expires;
+        }
+    }
+
+    public @NotNull Map<String, Long> remainingExpireSeconds(@NotNull Collection<String> keys) {
+        synchronized (this) {
+            Map<String, Long> expires = new HashMap<>();
+            if (keys.isEmpty()) return expires;
+
+            List<String> keyList = List.copyOf(keys);
+            long nowMillis = System.currentTimeMillis();
+            List<KeyValue<String, byte[]>> ttlList = this.commands.mget(
+                    keyList.stream().map(this::ttlKey).toArray(String[]::new)
+            );
+
+            for (int i = 0; i < keyList.size(); i++) {
+                KeyValue<String, byte[]> keyValue = ttlList.get(i);
+                if (!keyValue.hasValue()) continue;
+                Long ttl = this.remainingSeconds(keyValue.getValue(), nowMillis);
+                if (ttl != null) expires.put(keyList.get(i), ttl);
+            }
+            return expires;
         }
     }
 
@@ -108,14 +224,23 @@ public class RedisCacheService<V> extends CacheService<String, V> implements Aut
         Map<String, V> entries = new HashMap<>();
 
         ScanCursor cursor = ScanCursor.INITIAL;
-        ScanArgs args = new ScanArgs().match(pattern);
+        ScanArgs args = new ScanArgs().match(pattern).limit(1000);
         while (!cursor.isFinished()) {
             KeyScanCursor<String> scan = this.commands.scan(cursor, args);
-            for (String redisKey : scan.getKeys()) {
-                byte[] rawValue = this.commands.get(redisKey);
+            if (scan.getKeys().isEmpty()) {
+                cursor = scan;
+                continue;
+            }
+
+            List<KeyValue<String, byte[]>> values = this.commands.mget(scan.getKeys().toArray(String[]::new));
+            for (KeyValue<String, byte[]> keyValue : values) {
+                if (!keyValue.hasValue()) continue;
+                byte[] rawValue = keyValue.getValue();
+
                 if (rawValue == null) continue;
 
                 String prefix = this.namespace + ":data:";
+                String redisKey = keyValue.getKey();
                 String key = redisKey.startsWith(prefix) ? redisKey.substring(prefix.length()) : redisKey;
                 entries.put(key, this.bytesToValue(rawValue));
             }
@@ -133,8 +258,17 @@ public class RedisCacheService<V> extends CacheService<String, V> implements Aut
         if (this.serializer == null) throw new IllegalStateException("Cache value type not resolved.");
         byte[] data = value == null ? SerializationRegistry.NULL_VALUE : this.serializer.toBytes(value);
 
-        if (infinite) this.commands.set(this.dataKey(key), data);
-        else this.commands.setex(this.dataKey(key), expireSeconds, data);
+        if (infinite) {
+            this.commands.set(this.dataKey(key), data);
+            this.commands.set(this.ttlKey(key), this.ttlSerializer.toBytes(-1L));
+        } else {
+            this.commands.setex(this.dataKey(key), expireSeconds, data);
+            this.commands.setex(
+                    this.ttlKey(key),
+                    expireSeconds,
+                    this.ttlSerializer.toBytes(System.currentTimeMillis() + expireSeconds * 1000L)
+            );
+        }
 
         // 广播操作
         Map<String, byte[]> body = new HashMap<>();
@@ -150,6 +284,7 @@ public class RedisCacheService<V> extends CacheService<String, V> implements Aut
         byte[] keyData = key.getBytes(StandardCharsets.UTF_8);
 
         this.commands.del(this.dataKey(key));
+        this.commands.del(this.ttlKey(key));
 
         // 广播操作
         this.commands.xadd(this.streamKey, Map.of(
@@ -161,7 +296,16 @@ public class RedisCacheService<V> extends CacheService<String, V> implements Aut
     @Override
     protected void doClear() {
         ScanCursor cursor = ScanCursor.INITIAL;
-        ScanArgs args = new ScanArgs().match(this.namespace + ":data:*");
+        ScanArgs args = new ScanArgs().match(this.namespace + ":data:*").limit(1000);
+        while (!cursor.isFinished()) {
+            KeyScanCursor<String> scan = this.commands.scan(cursor, args);
+            for (String key : scan.getKeys()) this.commands.del(key);
+
+            cursor = scan;
+        }
+
+        cursor = ScanCursor.INITIAL;
+        args = new ScanArgs().match(this.namespace + ":ttl:*").limit(1000);
         while (!cursor.isFinished()) {
             KeyScanCursor<String> scan = this.commands.scan(cursor, args);
             for (String key : scan.getKeys()) this.commands.del(key);
@@ -195,7 +339,7 @@ public class RedisCacheService<V> extends CacheService<String, V> implements Aut
         int i = 0;
 
         ScanCursor cursor = ScanCursor.INITIAL;
-        ScanArgs args = new ScanArgs().match(this.namespace + ":data:*");
+        ScanArgs args = new ScanArgs().match(this.namespace + ":data:*").limit(1000);
         while (!cursor.isFinished()) {
             KeyScanCursor<String> scan = this.commands.scan(cursor, args);
             i += scan.getKeys().size();

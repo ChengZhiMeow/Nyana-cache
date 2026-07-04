@@ -8,7 +8,7 @@ allprojects {
     apply(plugin = "maven-publish")
 
     group = "net.nyana"
-    version = "1.0.4"
+    version = "1.0.5"
 
     java {
         sourceCompatibility = JavaVersion.VERSION_21
@@ -66,6 +66,9 @@ project(":redis") {
             shouldRunAfter(tasks.named("test"))
             useJUnitPlatform()
             systemProperty("nyana.redis.tests", "true")
+            System.getProperty("nyana.redis.benchmark")?.let {
+                systemProperty("nyana.redis.benchmark", it)
+            }
         }
 
         val redisTest = tasks.findByName("redisTest")

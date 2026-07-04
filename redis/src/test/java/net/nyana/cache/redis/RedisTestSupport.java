@@ -8,6 +8,7 @@ import java.util.function.BooleanSupplier;
 
 final class RedisTestSupport {
     static final String ENABLED_PROPERTY = "nyana.redis.tests";
+    static final String BENCHMARK_PROPERTY = "nyana.redis.benchmark";
 
     static RedisClient client() {
         return new RedisClient(RedisConfig.builder(System.getProperty("nyana.redis.host", "localhost"))

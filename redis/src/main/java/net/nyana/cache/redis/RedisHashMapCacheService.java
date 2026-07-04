@@ -87,8 +87,10 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
 
     @Override
     public void init() {
-        for (Map.Entry<String, V> entry : this.redis.entries().entrySet()) {
-            super.doPut(entry.getKey(), entry.getValue(), this.redis.remainingExpireSeconds(entry.getKey()));
+        Map<String, V> entries = this.redis.entries();
+        Map<String, Long> expires = this.redis.remainingExpireSeconds();
+        for (Map.Entry<String, V> entry : entries.entrySet()) {
+            super.doPut(entry.getKey(), entry.getValue(), expires.get(entry.getKey()));
         }
         this.lastStreamId = this.lastStreamId();
 
