@@ -14,13 +14,29 @@ public class SerializationRegistry extends Registry<Class<?>, CacheSerializer<?>
         super(true);
         this.register(byte[].class, new ByteArraySerializer());
         this.register(String.class, new StringSerializer());
+
+        this.register(int.class, new IntegerSerializer());
         this.register(Integer.class, new IntegerSerializer());
+
+        this.register(long.class, new LongSerializer());
         this.register(Long.class, new LongSerializer());
+
+        this.register(boolean.class, new BooleanSerializer());
         this.register(Boolean.class, new BooleanSerializer());
+
+        this.register(double.class, new BooleanSerializer());
         this.register(Double.class, new DoubleSerializer());
+
+        this.register(float.class, new FloatSerializer());
         this.register(Float.class, new FloatSerializer());
+
+        this.register(short.class, new ShortSerializer());
         this.register(Short.class, new ShortSerializer());
+
+        this.register(byte.class, new ByteArraySerializer());
         this.register(Byte.class, new ByteSerializer());
+
+        this.register(char.class, new ByteArraySerializer());
         this.register(Character.class, new CharacterSerializer());
     }
 
