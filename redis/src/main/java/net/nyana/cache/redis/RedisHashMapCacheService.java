@@ -31,6 +31,7 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
     private final RedisCacheService<V> redis;
     private final StatefulRedisConnection<String, byte[]> streamConnection;
     private final RedisCommands<String, byte[]> streamCommands;
+    private final boolean initLoadData;
     private volatile boolean alwaysReadFromHashMap;
     private volatile boolean closed;
     private volatile String lastStreamId = "$";
@@ -40,16 +41,7 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
             @NotNull RedisClient client,
             @NotNull String namespace
     ) {
-        this(cache, client, namespace, false, null);
-    }
-
-    public RedisHashMapCacheService(
-            @NotNull NyanaCache cache,
-            @NotNull RedisClient client,
-            @NotNull String namespace,
-            @NotNull Class<V> type
-    ) {
-        this(cache, client, namespace, false, type);
+        this(cache, client, namespace, false, true, null);
     }
 
     public RedisHashMapCacheService(
@@ -58,7 +50,27 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
             @NotNull String namespace,
             boolean alwaysReadFromHashMap
     ) {
-        this(cache, client, namespace, alwaysReadFromHashMap, null);
+        this(cache, client, namespace, alwaysReadFromHashMap, true, null);
+    }
+
+    public RedisHashMapCacheService(
+            @NotNull NyanaCache cache,
+            @NotNull RedisClient client,
+            @NotNull String namespace,
+            @NotNull Class<V> type
+    ) {
+        this(cache, client, namespace, false, true, type);
+    }
+
+
+    public RedisHashMapCacheService(
+            @NotNull NyanaCache cache,
+            @NotNull RedisClient client,
+            @NotNull String namespace,
+            boolean alwaysReadFromHashMap,
+            @NotNull Class<V> type
+    ) {
+        this(cache, client, namespace, alwaysReadFromHashMap, true, type);
     }
 
     public RedisHashMapCacheService(
@@ -66,12 +78,25 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
             @NotNull RedisClient client,
             @NotNull String namespace,
             boolean alwaysReadFromHashMap,
+            boolean initLoadData
+    ) {
+        this(cache, client, namespace, alwaysReadFromHashMap, initLoadData, null);
+    }
+
+    public RedisHashMapCacheService(
+            @NotNull NyanaCache cache,
+            @NotNull RedisClient client,
+            @NotNull String namespace,
+            boolean alwaysReadFromHashMap,
+            boolean initLoadData,
             @Nullable Class<V> type
     ) {
         super(cache);
         if (type != null)
             this.redis = new RedisCacheService<>(cache, client, namespace, false, false, type);
         else this.redis = new RedisCacheService<>(cache, client, namespace, false, false);
+        this.initLoadData = initLoadData;
+
         this.streamConnection = client.connect();
         this.streamCommands = this.streamConnection.sync();
         this.alwaysReadFromHashMap = alwaysReadFromHashMap;
@@ -87,13 +112,15 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
 
     @Override
     public void init() {
-        Map<String, V> entries = this.redis.entries();
-        Map<String, Long> expires = this.redis.remainingExpireSeconds();
-        for (Map.Entry<String, V> entry : entries.entrySet()) {
-            super.doPut(entry.getKey(), entry.getValue(), expires.get(entry.getKey()));
+        if (initLoadData) {
+            Map<String, V> entries = this.redis.entries();
+            Map<String, Long> expires = this.redis.remainingExpireSeconds();
+            for (Map.Entry<String, V> entry : entries.entrySet()) {
+                super.doPut(entry.getKey(), entry.getValue(), expires.get(entry.getKey()));
+            }
         }
-        this.lastStreamId = this.lastStreamId();
 
+        this.lastStreamId = this.lastStreamId();
         Thread thread = new Thread(() -> {
             while (!this.closed) {
                 try {
