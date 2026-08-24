@@ -226,14 +226,14 @@ public class RedisHashMapCacheService<V> extends HashMapCacheService<String, V> 
         }
     }
 
-    public void setToHashMap(
+    public void putToHashMap(
             @NotNull String key,
             @Nullable V value
     ) {
         super.put(key, value);
     }
 
-    public void setToHashMap(
+    public void putToHashMap(
             @NotNull String key,
             @Nullable V value,
             @Nullable Long expireSeconds
